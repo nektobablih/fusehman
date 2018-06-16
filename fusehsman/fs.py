@@ -146,4 +146,4 @@ if __name__ == '__main__':
 
     logging.basicConfig(level=logging.DEBUG)
 
-fuse = FUSE(Hierarchical(argv[1]), argv[3], foreground=True)
+    fuse = FUSE(Hierarchical(argv[1]), argv[3], foreground=True)
