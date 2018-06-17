@@ -1,12 +1,14 @@
 #!/usr/bin/env python
 from __future__ import print_function, absolute_import, division
+
+from errno import EACCES
 from shutil import copyfile
 
 import logging
 import tarfile
 from threading import Timer
 
-import os.path as p
+import os.path as os_path
 from sys import argv, exit
 from threading import Lock
 
@@ -15,29 +17,39 @@ import os
 from fuse import FUSE, FuseOSError, Operations, LoggingMixIn
 
 
-class Hierarchical(LoggingMixIn, Operations):
-    def __init__(self, data):
-        self.data = p.realpath(data)
-        self.archive_name = p.join(p.dirname(p.realpath(data)), 'archive.tar.gz')
+class ArchiveManager():
+    def __init__(self, path):
+        self.archive_name = os_path.join(path, 'archive.tar.gz')
+        try:
+            os.remove(self.archive_name)
+        except OSError:
+            pass
         self.archive = tarfile.open(self.archive_name, mode='w:gz')
         self.archive.close()
-        self.archved_files = {}
+        self.archived_files = {}
         self.timer = {}
-        self.rwlock = Lock()
+
+    OFFSET = 600.0
 
     def compress(self, path, fh):
-        if fh in self.archved_files.keys() and self.archved_files[fh] == False:
+        if fh not in self.archived_files.keys() or self.archived_files[fh] is False:
             with tarfile.open(self.archive_name, mode='w:gz') as tar:
                 tar.add(path)
+            self.archived_files[fh] = True
             try:
                 os.remove(path)
             except OSError:
                 pass
-            self.archved_files[fh] = True
+
+    def compress_with_timer(self, path, fh):
+        if fh in self.timer.keys():
+            self.timer[fh].cancel()
+        self.timer[fh] = Timer(self.OFFSET, self.compress, [path, fh])
+        self.timer[fh].start()
 
     def extract(self, path, fh):
-        if fh in self.archved_files.keys() and self.archved_files[fh] == True:
-            old_archive_name = p.join(p.dirname(self.archive_name), 'old_archive.tar.gz')
+        if fh in self.archived_files.keys() and self.archived_files[fh] is True:
+            old_archive_name = os_path.join(os_path.dirname(self.archive_name), 'old_archive.tar.gz')
             os.rename(self.archive_name, old_archive_name)
             original = tarfile.open(old_archive_name)
             modified = tarfile.open(self.archive_name, 'w:gz')
@@ -52,20 +64,31 @@ class Hierarchical(LoggingMixIn, Operations):
             original.close()
             modified.close()
             self.timer[fh] = Timer(600.0, self.compress, [path, fh])
-            self.archved_files[fh] = False
+            self.archived_files[fh] = False
         else:
             pass
 
+
+class Hierarchical(LoggingMixIn, Operations):
+    def __init__(self, data):
+        self.data = os_path.abspath(data)
+        self.archive = ArchiveManager(os_path.dirname(self.data))
+        self.rwlock = Lock()
+
     def __call__(self, op, path, *args):
-        return super(Hierarchical, self).__call__(op, p.join(self.data, path), *args)
+        new_path = os_path.join(self.data, os.path.abspath(path)[1:])
+        return LoggingMixIn.__call__(self, op, new_path, *args)
+
+    def access(self, path, mode):
+        if not os.access(path, mode):
+            raise FuseOSError(EACCES)
 
     chmod = os.chmod
     chown = os.chown
 
     def create(self, path, mode):
         fh = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, mode)
-        self.archved_files[fh] = False
-        # self.timer[fh] = Timer(600.0, self.compress, [path, fh])
+        self.archive.compress_with_timer(path, fh)
         return fh
 
     def flush(self, path, fh):
@@ -77,10 +100,10 @@ class Hierarchical(LoggingMixIn, Operations):
         else:
           return os.fsync(fh)
 
-    # def getattr(self, path, fh=None):
-    #     st = os.lstat(path)
-    #     return dict((key, getattr(st, key)) for key in ('st_atime', 'st_ctime',
-    #         'st_gid', 'st_mode', 'st_mtime', 'st_nlink', 'st_size', 'st_uid'))
+    def getattr(self, path, fh=None):
+        st = os.lstat(path)
+        return dict((key, getattr(st, key)) for key in ('st_atime', 'st_ctime',
+            'st_gid', 'st_mode', 'st_mtime', 'st_nlink', 'st_size', 'st_uid'))
 
     getxattr = None
 
@@ -103,9 +126,10 @@ class Hierarchical(LoggingMixIn, Operations):
             return os.read(fh, size)
 
     def readdir(self, path, fh):
-        with tarfile.open(self.archive_name) as tar:
-            tarlist = tar.list(verbose=False)
-            return ['.', '..'] + os.listdir(path) + tarlist
+        # with tarfile.open(self.archive_name) as tar:
+            # tarlist = tar.list(verbose=False)
+        logging.info(['.', '..'] + os.listdir(path))
+        return ['.', '..'] + os.listdir(path)
 
     readlink = os.readlink
 
@@ -113,7 +137,7 @@ class Hierarchical(LoggingMixIn, Operations):
         return os.close(fh)
 
     def rename(self, old, new):
-        return os.rename(old, p.join(self.data, new))
+        return os.rename(old, os_path.join(self.data, new))
 
     rmdir = os.rmdir
 
@@ -139,11 +163,14 @@ class Hierarchical(LoggingMixIn, Operations):
             return os.write(fh, data)
 
 
-if __name__ == '__main__':
+def main():
     if len(argv) != 3:
         print('usage: %s <data> <mountpoint>' % argv[0])
         exit(1)
 
     logging.basicConfig(level=logging.DEBUG)
+    FUSE(Hierarchical(argv[1]), argv[2], foreground=True)
 
-    fuse = FUSE(Hierarchical(argv[1]), argv[3], foreground=True)
+
+if __name__ == '__main__':
+    main()
