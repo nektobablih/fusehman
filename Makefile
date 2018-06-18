@@ -15,3 +15,7 @@ develop:
 	virtualenv env -p python2.7
 	env/bin/pip install -Ue .
 
+list:
+	ls $(DATA_DIR)
+	ls $(MOUNT_POINT)
+	tar -tf archive.tar.gz
